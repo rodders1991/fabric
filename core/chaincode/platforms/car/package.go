@@ -27,7 +27,7 @@ import (
 	"time"
 
 	cutil "github.com/hyperledger/fabric/core/container/util"
-	pb "github.com/hyperledger/fabric/protos"
+	pb "github.com/hyperledger/fabric/protos/peer"
 )
 
 func download(path string) (string, error) {
@@ -67,11 +67,6 @@ func (carPlatform *Platform) WritePackage(spec *pb.ChaincodeSpec, tw *tar.Writer
 	path, err := download(spec.ChaincodeID.Path)
 	if err != nil {
 		return err
-	}
-
-	spec.ChaincodeID.Name, err = generateHashcode(spec, path)
-	if err != nil {
-		return fmt.Errorf("Error generating hashcode: %s", err)
 	}
 
 	var buf []string

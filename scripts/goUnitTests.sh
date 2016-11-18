@@ -15,12 +15,10 @@ fi
 
 echo "Running unit tests using $IMAGE"
 
-echo "Cleaning membership services folder"
-rm -rf membersrvc/ca/.ca/
-
 echo -n "Obtaining list of tests to run.."
 # Some examples don't play nice with `go test`
 PKGS=`go list github.com/hyperledger/fabric/... | grep -v /vendor/ | \
+                                                  grep -v /build/ | \
 	                                          grep -v /examples/chaincode/chaintool/ | \
 						  grep -v /examples/chaincode/go/asset_management | \
 						  grep -v /examples/chaincode/go/utxo | \

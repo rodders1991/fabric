@@ -21,14 +21,14 @@ import (
 
 	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/core/chaincode/shim"
-	ld "github.com/hyperledger/fabric/core/ledger"
-	"github.com/hyperledger/fabric/protos"
+
+	pb "github.com/hyperledger/fabric/protos/peer"
 )
 
 var logger = shim.NewLogger("noop")
 
 type ledgerHandler interface {
-	GetTransactionByID(txID string) (*protos.Transaction, error)
+	GetTransactionByID(txID string) (*pb.Transaction, error)
 }
 
 // SystemChaincode is type representing the chaincode
@@ -40,10 +40,6 @@ type SystemChaincode struct {
 
 func (t *SystemChaincode) getLedger() ledgerHandler {
 	if t.mockLedgerH == nil {
-		lh, err := ld.GetLedger()
-		if err == nil {
-			return lh
-		}
 		panic("Chaincode is unable to get the ledger.")
 	} else {
 		return t.mockLedgerH
@@ -51,15 +47,16 @@ func (t *SystemChaincode) getLedger() ledgerHandler {
 }
 
 // Init initailizes the system chaincode
-func (t *SystemChaincode) Init(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+func (t *SystemChaincode) Init(stub shim.ChaincodeStubInterface) ([]byte, error) {
 	logger.SetLevel(shim.LogDebug)
 	logger.Debugf("NOOP INIT")
 	return nil, nil
 }
 
 // Invoke runs an invocation on the system chaincode
-func (t *SystemChaincode) Invoke(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
-	if len(args) != 0 || function == "" {
+func (t *SystemChaincode) Invoke(stub shim.ChaincodeStubInterface) ([]byte, error) {
+	args := stub.GetStringArgs()
+	if len(args) != 1 {
 		return nil, errors.New("Noop execute operation must have one single argument.")
 	}
 	logger.Infof("Executing noop invoke.")
@@ -67,7 +64,8 @@ func (t *SystemChaincode) Invoke(stub shim.ChaincodeStubInterface, function stri
 }
 
 // Query callback representing the query of a chaincode
-func (t *SystemChaincode) Query(stub shim.ChaincodeStubInterface, function string, args []string) ([]byte, error) {
+func (t *SystemChaincode) Query(stub shim.ChaincodeStubInterface) ([]byte, error) {
+	function, args := stub.GetFunctionAndParameters()
 	switch function {
 	case "getTran":
 		if len(args) < 1 {
@@ -81,7 +79,7 @@ func (t *SystemChaincode) Query(stub shim.ChaincodeStubInterface, function strin
 		if nil != txerr || nil == tx {
 			return nil, txerr
 		}
-		newCCIS := &protos.ChaincodeInvocationSpec{}
+		newCCIS := &pb.ChaincodeInvocationSpec{}
 		var merr = proto.Unmarshal(tx.Payload, newCCIS)
 		if nil != merr {
 			return nil, merr

@@ -24,14 +24,52 @@ import (
 	"os"
 	"strings"
 
+	"github.com/golang/protobuf/proto"
 	"github.com/hyperledger/fabric/core"
+	"github.com/hyperledger/fabric/msp"
 	"github.com/hyperledger/fabric/peer/common"
 	"github.com/hyperledger/fabric/peer/util"
-	pb "github.com/hyperledger/fabric/protos"
+	pb "github.com/hyperledger/fabric/protos/peer"
+	putils "github.com/hyperledger/fabric/protos/utils"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"golang.org/x/net/context"
 )
+
+//getProposal gets the proposal for the chaincode invocation
+//Currently supported only for Invokes (Queries still go through devops client)
+func getProposal(cis *pb.ChaincodeInvocationSpec, creator []byte) (*pb.Proposal, error) {
+	return putils.CreateChaincodeProposal(cis, creator)
+}
+
+func getSignedProposal(prop *pb.Proposal, signer msp.SigningIdentity) (*pb.SignedProposal, error) {
+	propBytes, err := putils.GetBytesProposal(prop)
+	if err != nil {
+		return nil, err
+	}
+
+	signature, err := signer.Sign(propBytes)
+	if err != nil {
+		return nil, err
+	}
+
+	return &pb.SignedProposal{ProposalBytes: propBytes, Signature: signature}, nil
+}
+
+//getDeployProposal gets the proposal for the chaincode deployment
+//the payload is a ChaincodeDeploymentSpec
+func getDeployProposal(cds *pb.ChaincodeDeploymentSpec, creator []byte) (*pb.Proposal, error) {
+	b, err := proto.Marshal(cds)
+	if err != nil {
+		return nil, err
+	}
+
+	//wrap the deployment in an invocation spec to lccc...
+	lcccSpec := &pb.ChaincodeInvocationSpec{ChaincodeSpec: &pb.ChaincodeSpec{Type: pb.ChaincodeSpec_GOLANG, ChaincodeID: &pb.ChaincodeID{Name: "lccc"}, CtorMsg: &pb.ChaincodeInput{Args: [][]byte{[]byte("deploy"), []byte("default"), b}}}}
+
+	//...and get the proposal for it
+	return getProposal(lcccSpec, creator)
+}
 
 func getChaincodeSpecification(cmd *cobra.Command) (*pb.ChaincodeSpec, error) {
 	spec := &pb.ChaincodeSpec{}
@@ -105,20 +143,18 @@ func getChaincodeSpecification(cmd *cobra.Command) (*pb.ChaincodeSpec, error) {
 }
 
 // chaincodeInvokeOrQuery invokes or queries the chaincode. If successful, the
-// INVOKE form prints the transaction ID on STDOUT, and the QUERY form prints
+// INVOKE form prints the ProposalResponse to STDOUT, and the QUERY form prints
 // the query result on STDOUT. A command-line flag (-r, --raw) determines
 // whether the query result is output as raw bytes, or as a printable string.
 // The printable form is optionally (-x, --hex) a hexadecimal representation
 // of the query response. If the query response is NIL, nothing is output.
+//
+// NOTE - Query will likely go away as all interactions with the endorser are
+// Proposal and ProposalResponses
 func chaincodeInvokeOrQuery(cmd *cobra.Command, args []string, invoke bool) (err error) {
 	spec, err := getChaincodeSpecification(cmd)
 	if err != nil {
 		return err
-	}
-
-	devopsClient, err := common.GetDevopsClient(cmd)
-	if err != nil {
-		return fmt.Errorf("Error building %s: %s", chainFuncName, err)
 	}
 
 	// Build the ChaincodeInvocationSpec message
@@ -127,25 +163,67 @@ func chaincodeInvokeOrQuery(cmd *cobra.Command, args []string, invoke bool) (err
 		invocation.IdGenerationAlg = customIDGenAlg
 	}
 
-	var resp *pb.Response
 	if invoke {
-		resp, err = devopsClient.Invoke(context.Background(), invocation)
-	} else {
-		resp, err = devopsClient.Query(context.Background(), invocation)
-	}
-
-	if err != nil {
-		if invoke {
-			err = fmt.Errorf("Error invoking %s: %s\n", chainFuncName, err)
-		} else {
-			err = fmt.Errorf("Error querying %s: %s\n", chainFuncName, err)
+		endorserClient, err := common.GetEndorserClient(cmd)
+		if err != nil {
+			return fmt.Errorf("Error getting endorser client %s: %s", chainFuncName, err)
 		}
-		return
-	}
-	if invoke {
-		transactionID := string(resp.Msg)
-		logger.Infof("Successfully invoked transaction: %s(%s)", invocation, transactionID)
+
+		// TODO: how should we get signing ID from the command line?
+		mspId := "DEFAULT"
+		id := "PEER"
+		signingIdentity := &msp.IdentityIdentifier{Mspid: msp.ProviderIdentifier{Value: mspId}, Value: id}
+
+		// TODO: how should we obtain the config for the MSP from the command line? a hardcoded test config?
+		signer, err := msp.GetManager().GetSigningIdentity(signingIdentity)
+		if err != nil {
+			return fmt.Errorf("Error obtaining signing identity for %s: %s\n", signingIdentity, err)
+		}
+
+		creator, err := signer.Serialize()
+		if err != nil {
+			return fmt.Errorf("Error serializing identity for %s: %s\n", signingIdentity, err)
+		}
+
+		var prop *pb.Proposal
+		prop, err = getProposal(invocation, creator)
+		if err != nil {
+			return fmt.Errorf("Error creating proposal  %s: %s\n", chainFuncName, err)
+		}
+
+		var signedProp *pb.SignedProposal
+		signedProp, err = getSignedProposal(prop, signer)
+		if err != nil {
+			return fmt.Errorf("Error creating signed proposal  %s: %s\n", chainFuncName, err)
+		}
+
+		var proposalResp *pb.ProposalResponse
+		proposalResp, err = endorserClient.ProcessProposal(context.Background(), signedProp)
+		if err != nil {
+			return fmt.Errorf("Error endorsing %s: %s\n", chainFuncName, err)
+		}
+
+		if proposalResp != nil {
+			if err = sendTransaction(proposalResp); err != nil {
+				return fmt.Errorf("Error sending transaction %s: %s\n", chainFuncName, err)
+			}
+		}
+
+		logger.Infof("Invoke result: %v", proposalResp)
 	} else {
+		//for now let's continue to use Query with devops
+		//eventually query will go away
+		var devopsClient pb.DevopsClient
+		devopsClient, err = common.GetDevopsClient(cmd)
+		if err != nil {
+			return fmt.Errorf("Error building %s: %s", chainFuncName, err)
+		}
+
+		var resp *pb.Response
+		if resp, err = devopsClient.Query(context.Background(), invocation); err != nil {
+			return fmt.Errorf("Error querying %s: %s\n", chainFuncName, err)
+		}
+
 		logger.Infof("Successfully queried transaction: %s", invocation)
 		if resp != nil {
 			if chaincodeQueryRaw {
@@ -164,15 +242,15 @@ func chaincodeInvokeOrQuery(cmd *cobra.Command, args []string, invoke bool) (err
 			}
 		}
 	}
+
 	return nil
 }
 
 func checkChaincodeCmdParams(cmd *cobra.Command) error {
 
+	//we need chaincode name for everything, including deploy
 	if chaincodeName == common.UndefinedParamValue {
-		if chaincodePath == common.UndefinedParamValue {
-			return fmt.Errorf("Must supply value for %s path parameter.\n", chainFuncName)
-		}
+		return fmt.Errorf("Must supply value for %s name parameter.\n", chainFuncName)
 	}
 
 	// Check that non-empty chaincode parameters contain only Args as a key.
@@ -209,4 +287,36 @@ func checkChaincodeCmdParams(cmd *cobra.Command) error {
 	}
 
 	return nil
+}
+
+//sendTransactions converts a ProposalResponse and sends it as
+//a Transaction to the orderer
+func sendTransaction(presp *pb.ProposalResponse) error {
+	var orderer string
+	if viper.GetBool("peer.committer.enabled") {
+		orderer = viper.GetString("peer.committer.ledger.orderer")
+	}
+
+	if orderer == "" {
+		return nil
+	}
+
+	var err error
+	if presp != nil {
+		if presp.Response.Status != 200 {
+			return fmt.Errorf("Proposal response erred with status %d", presp.Response.Status)
+		}
+		if presp.Payload != nil {
+			tx, err := putils.CreateTxFromProposalResponse(presp)
+			b, err := proto.Marshal(tx)
+			if err != nil {
+				return err
+			}
+
+			if b != nil {
+				err = Send(orderer, b)
+			}
+		}
+	}
+	return err
 }

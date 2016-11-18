@@ -29,18 +29,18 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/hyperledger/fabric/consensus/helper"
 	"github.com/hyperledger/fabric/core"
 	"github.com/hyperledger/fabric/core/chaincode"
 	"github.com/hyperledger/fabric/core/comm"
+	"github.com/hyperledger/fabric/core/committer/noopssinglechain"
 	"github.com/hyperledger/fabric/core/crypto"
+	"github.com/hyperledger/fabric/core/crypto/primitives"
 	"github.com/hyperledger/fabric/core/db"
-	"github.com/hyperledger/fabric/core/ledger/genesis"
+	"github.com/hyperledger/fabric/core/endorser"
 	"github.com/hyperledger/fabric/core/peer"
 	"github.com/hyperledger/fabric/core/rest"
-	"github.com/hyperledger/fabric/core/system_chaincode"
 	"github.com/hyperledger/fabric/events/producer"
-	pb "github.com/hyperledger/fabric/protos"
+	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"google.golang.org/grpc"
@@ -150,15 +150,10 @@ func serve(args []string) error {
 
 	// Create the peerServer
 	if peer.ValidatorEnabled() {
-		logger.Debug("Running as validating peer - making genesis block if needed")
-		makeGenesisError := genesis.MakeGenesis()
-		if makeGenesisError != nil {
-			return makeGenesisError
-		}
 		logger.Debugf("Running as validating peer - installing consensus %s",
 			viper.GetString("peer.validator.consensus"))
 
-		peerServer, err = peer.NewPeerWithEngine(secHelperFunc, helper.GetEngine)
+		peerServer, err = peer.NewPeerWithEngine(secHelperFunc, peer.GetEngine)
 	} else {
 		logger.Debug("Running as non-validating peer")
 		peerServer, err = peer.NewPeerWithHandler(secHelperFunc, peer.NewPeerHandler)
@@ -192,6 +187,22 @@ func serve(args []string) error {
 	// Create and register the REST service if configured
 	if viper.GetBool("rest.enabled") {
 		go rest.StartOpenchainRESTServer(serverOpenchain, serverDevops)
+	}
+
+	// Register the Endorser server
+	serverEndorser := endorser.NewEndorserServer(peerServer)
+	pb.RegisterEndorserServer(grpcServer, serverEndorser)
+
+	// !!!IMPORTANT!!! - as mentioned in core.yaml, peer-orderer-committer
+	// interaction is closely tied to bootstrapping. This is to be viewed
+	// as temporary implementation to test the end-to-end flows in the
+	// system outside of multi-ledger, multi-channel work
+	if deliverService := noopssinglechain.NewDeliverService(); deliverService != nil {
+		go func() {
+			if err := deliverService.Start(); err != nil {
+				fmt.Printf("Could not start solo committer(%s), continuing without committer\n", err)
+			}
+		}()
 	}
 
 	logger.Infof("Starting peer with ID=%s, network ID=%s, address=%s, rootnodes=%v, validator=%v",
@@ -265,7 +276,7 @@ func registerChaincodeSupport(chainname chaincode.ChainName, grpcServer *grpc.Se
 		ccStartupTimeout, secHelper)
 
 	//Now that chaincode is initialized, register all system chaincodes.
-	system_chaincode.RegisterSysCCs()
+	chaincode.RegisterSysCCs()
 
 	pb.RegisterChaincodeSupportServer(grpcServer, ccSrv)
 }
@@ -346,34 +357,9 @@ var once sync.Once
 //NOTE- this crypto func might rightly belong in a crypto package
 //and universally accessed
 func getSecHelper() (crypto.Peer, error) {
-	var secHelper crypto.Peer
-	var err error
+	//TODO:  integrated new crypto / idp code
 	once.Do(func() {
-		if core.SecurityEnabled() {
-			enrollID := viper.GetString("security.enrollID")
-			enrollSecret := viper.GetString("security.enrollSecret")
-			if peer.ValidatorEnabled() {
-				logger.Debugf("Registering validator with enroll ID: %s", enrollID)
-				if err = crypto.RegisterValidator(enrollID, nil, enrollID, enrollSecret); nil != err {
-					return
-				}
-				logger.Debugf("Initializing validator with enroll ID: %s", enrollID)
-				secHelper, err = crypto.InitValidator(enrollID, nil)
-				if nil != err {
-					return
-				}
-			} else {
-				logger.Debugf("Registering non-validator with enroll ID: %s", enrollID)
-				if err = crypto.RegisterPeer(enrollID, nil, enrollID, enrollSecret); nil != err {
-					return
-				}
-				logger.Debugf("Initializing non-validator with enroll ID: %s", enrollID)
-				secHelper, err = crypto.InitPeer(enrollID, nil)
-				if nil != err {
-					return
-				}
-			}
-		}
+		primitives.SetSecurityLevel("SHA2", 256)
 	})
-	return secHelper, err
+	return nil, nil
 }

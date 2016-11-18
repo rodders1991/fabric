@@ -20,7 +20,7 @@ import (
 	"fmt"
 
 	"github.com/hyperledger/fabric/core/peer"
-	pb "github.com/hyperledger/fabric/protos"
+	pb "github.com/hyperledger/fabric/protos/peer"
 	"github.com/spf13/cobra"
 )
 
@@ -35,4 +35,14 @@ func GetDevopsClient(cmd *cobra.Command) (pb.DevopsClient, error) {
 	}
 	devopsClient := pb.NewDevopsClient(clientConn)
 	return devopsClient, nil
+}
+
+// GetEndorserClient returns a new endorser client connection for this peer
+func GetEndorserClient(cmd *cobra.Command) (pb.EndorserClient, error) {
+	clientConn, err := peer.NewPeerClientConnection()
+	if err != nil {
+		return nil, fmt.Errorf("Error trying to connect to local peer: %s", err)
+	}
+	endorserClient := pb.NewEndorserClient(clientConn)
+	return endorserClient, nil
 }
